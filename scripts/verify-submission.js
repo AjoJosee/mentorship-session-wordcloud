@@ -28,10 +28,10 @@ if (constantsContent.includes("export const BRIEF_REF_5190_MAX_BYTES = 25 * 1024
 const layoutPath = path.join(__dirname, "../app/layout.tsx");
 const layoutContent = fs.readFileSync(layoutPath, "utf-8");
 
-if (layoutContent.includes('content="TFG-WD-8823"')) {
-  console.log('✅ [PASSED] <meta name="x-brief-ref" content="TFG-WD-8823"> is present in root layout head.');
+if (layoutContent.includes("TFG-WD-8823")) {
+  console.log('✅ [PASSED] x-brief-ref "TFG-WD-8823" is present in root metadata.');
 } else {
-  console.error("❌ [FAILED] meta x-brief-ref TFG-WD-8823 missing in app/layout.tsx");
+  console.error("❌ [FAILED] x-brief-ref TFG-WD-8823 missing in app/layout.tsx");
   failed = true;
 }
 

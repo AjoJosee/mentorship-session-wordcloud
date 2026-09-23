@@ -3,6 +3,7 @@ import { Groq } from "groq-sdk";
 import OpenAI from "openai";
 import { GoogleGenerativeAI } from "@google/generative-ai";
 import { BRIEF_REF_5190_MAX_BYTES, validateAudioFile } from "@/lib/constants";
+import { extractSemanticWords } from "@/lib/semantic-fallback";
 
 export const maxDuration = 60; // Allow up to 60 seconds on serverless
 export const dynamic = "force-dynamic";
@@ -11,6 +12,15 @@ interface WordItem {
   text: string;
   value: number;
 }
+
+const GROQ_CANDIDATE_CHAT_MODELS = [
+  "llama-3.1-8b-instant",
+  "llama3-70b-8192",
+  "llama3-8b-8192",
+  "gemma2-9b-it",
+  "mixtral-8x7b-32768",
+  "llama-3.3-70b-versatile",
+];
 
 const SYSTEM_PROMPT = `You are an expert educational and mentorship session analyst.
 You will receive a transcript of a one-to-one mentorship session with a school student.
@@ -135,7 +145,6 @@ export async function POST(req: NextRequest) {
         throw new Error(`OpenAI transcription failed: ${error.message || "Unknown error"}`);
       }
     } else if (geminiKey) {
-      // Direct multimodal transcription via Gemini Flash
       const genAI = new GoogleGenerativeAI(geminiKey);
       const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
       const arrayBuffer = await fileToSend.arrayBuffer();
@@ -164,59 +173,102 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // 6. Semantic Prominence Analysis Phase
+    // 6. Semantic Prominence Analysis Phase with Automatic Model Fallback
     let parsedWords: WordItem[] = [];
     let summary = "";
+    let analysisCompleted = false;
 
+    // Strategy A: Try Groq chat models in order of priority (llama-3.1-8b-instant first)
     if (groqKey) {
       const groq = new Groq({ apiKey: groqKey });
-      const completion = await groq.chat.completions.create({
-        model: "llama-3.3-70b-versatile",
-        messages: [
-          { role: "system", content: SYSTEM_PROMPT },
-          { role: "user", content: `Mentorship Session Transcript:\n"""\n${transcript}\n"""` },
-        ],
-        response_format: { type: "json_object" },
-        temperature: 0.2,
-      });
+      for (const model of GROQ_CANDIDATE_CHAT_MODELS) {
+        try {
+          const completion = await groq.chat.completions.create({
+            model,
+            messages: [
+              { role: "system", content: SYSTEM_PROMPT },
+              { role: "user", content: `Mentorship Session Transcript:\n"""\n${transcript}\n"""` },
+            ],
+            response_format: { type: "json_object" },
+            temperature: 0.2,
+          });
 
-      const content = completion.choices[0]?.message?.content;
-      if (content) {
-        const parsed = JSON.parse(content) as { summary?: string; words?: WordItem[] };
-        parsedWords = parsed.words || [];
-        summary = parsed.summary || "";
+          const content = completion.choices[0]?.message?.content;
+          if (content) {
+            const parsed = JSON.parse(content) as { summary?: string; words?: WordItem[] };
+            if (Array.isArray(parsed.words) && parsed.words.length > 0) {
+              parsedWords = parsed.words;
+              summary = parsed.summary || "";
+              analysisCompleted = true;
+              break;
+            }
+          }
+        } catch (err: unknown) {
+          const error = err as { status?: number; message?: string };
+          console.warn(`Groq model ${model} skipped (${error.status || error.message})`);
+          continue;
+        }
       }
-    } else if (geminiKey) {
-      const genAI = new GoogleGenerativeAI(geminiKey);
-      const model = genAI.getGenerativeModel({
-        model: "gemini-1.5-flash",
-        generationConfig: { responseMimeType: "application/json" },
-      });
-      const prompt = `${SYSTEM_PROMPT}\n\nMentorship Session Transcript:\n"""\n${transcript}\n"""`;
-      const res = await model.generateContent(prompt);
-      const content = res.response.text();
-      if (content) {
-        const parsed = JSON.parse(content) as { summary?: string; words?: WordItem[] };
-        parsedWords = parsed.words || [];
-        summary = parsed.summary || "";
+    }
+
+    // Strategy B: If Groq chat models failed or not configured, try Gemini
+    if (!analysisCompleted && geminiKey) {
+      try {
+        const genAI = new GoogleGenerativeAI(geminiKey);
+        const model = genAI.getGenerativeModel({
+          model: "gemini-1.5-flash",
+          generationConfig: { responseMimeType: "application/json" },
+        });
+        const prompt = `${SYSTEM_PROMPT}\n\nMentorship Session Transcript:\n"""\n${transcript}\n"""`;
+        const res = await model.generateContent(prompt);
+        const content = res.response.text();
+        if (content) {
+          const parsed = JSON.parse(content) as { summary?: string; words?: WordItem[] };
+          if (Array.isArray(parsed.words) && parsed.words.length > 0) {
+            parsedWords = parsed.words;
+            summary = parsed.summary || "";
+            analysisCompleted = true;
+          }
+        }
+      } catch (geminiErr) {
+        console.warn("Gemini analysis fallback failed:", geminiErr);
       }
-    } else if (openAIKey) {
-      const openai = new OpenAI({ apiKey: openAIKey });
-      const completion = await openai.chat.completions.create({
-        model: "gpt-4o-mini",
-        messages: [
-          { role: "system", content: SYSTEM_PROMPT },
-          { role: "user", content: `Mentorship Session Transcript:\n"""\n${transcript}\n"""` },
-        ],
-        response_format: { type: "json_object" },
-        temperature: 0.2,
-      });
-      const content = completion.choices[0]?.message?.content;
-      if (content) {
-        const parsed = JSON.parse(content) as { summary?: string; words?: WordItem[] };
-        parsedWords = parsed.words || [];
-        summary = parsed.summary || "";
+    }
+
+    // Strategy C: If OpenAI configured, try GPT-4o-mini
+    if (!analysisCompleted && openAIKey) {
+      try {
+        const openai = new OpenAI({ apiKey: openAIKey });
+        const completion = await openai.chat.completions.create({
+          model: "gpt-4o-mini",
+          messages: [
+            { role: "system", content: SYSTEM_PROMPT },
+            { role: "user", content: `Mentorship Session Transcript:\n"""\n${transcript}\n"""` },
+          ],
+          response_format: { type: "json_object" },
+          temperature: 0.2,
+        });
+        const content = completion.choices[0]?.message?.content;
+        if (content) {
+          const parsed = JSON.parse(content) as { summary?: string; words?: WordItem[] };
+          if (Array.isArray(parsed.words) && parsed.words.length > 0) {
+            parsedWords = parsed.words;
+            summary = parsed.summary || "";
+            analysisCompleted = true;
+          }
+        }
+      } catch (openAiErr) {
+        console.warn("OpenAI analysis fallback failed:", openAiErr);
       }
+    }
+
+    // Strategy D: Safety Net — Linguistic Semantic Extractor
+    // If all LLM chat models fail (e.g. rate limits or quota), we use our linguistic stopword/filler filter & normalizer
+    if (!analysisCompleted || parsedWords.length === 0) {
+      console.info("Using resilient linguistic semantic extractor safety net");
+      const fallbackResult = extractSemanticWords(transcript);
+      parsedWords = fallbackResult.words;
+      summary = summary || fallbackResult.summary;
     }
 
     const words = parsedWords

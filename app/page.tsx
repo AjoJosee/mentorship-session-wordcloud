@@ -46,9 +46,11 @@ export default function Home() {
   const [isHistoryOpen, setIsHistoryOpen] = useState(false);
   const [isApiKeyModalOpen, setIsApiKeyModalOpen] = useState(false);
   const [customApiKey, setCustomApiKey] = useState("");
+  const [mounted, setMounted] = useState(false);
 
   // Load history and custom API key from localStorage on mount
   useEffect(() => {
+    setMounted(true);
     try {
       const storedHistory = localStorage.getItem(LOCAL_STORAGE_HISTORY_KEY);
       if (storedHistory) {
@@ -260,7 +262,7 @@ export default function Home() {
             >
               <History className="w-4 h-4" />
               <span className="hidden sm:inline">History</span>
-              {history.length > 0 && (
+              {mounted && history.length > 0 && (
                 <span className="bg-slate-200 text-slate-700 text-[10px] px-1.5 py-0.2 rounded-full font-mono">
                   {history.length}
                 </span>
@@ -274,7 +276,7 @@ export default function Home() {
             >
               <Key className="w-4 h-4" />
               <span className="hidden sm:inline">API Key</span>
-              {customApiKey && (
+              {mounted && customApiKey && (
                 <span className="w-2 h-2 rounded-full bg-emerald-500" title="Custom key configured" />
               )}
             </button>
