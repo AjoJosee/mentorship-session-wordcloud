@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { Groq } from "groq-sdk";
+import { Groq, toFile } from "groq-sdk";
 import OpenAI from "openai";
 import { GoogleGenerativeAI } from "@google/generative-ai";
 import { BRIEF_REF_5190_MAX_BYTES, validateAudioFile } from "@/lib/constants";
@@ -47,13 +47,12 @@ STRICT RULES:
 
 export async function POST(req: NextRequest) {
   try {
-    // 1. Resolve API keys with intelligent auto-detection
+    // 1. Resolve API keys with auto-detection
     const customHeader = req.headers.get("x-custom-api-key")?.trim().replace(/^["']|["']$/g, "");
     let groqKey = req.headers.get("x-groq-api-key")?.trim().replace(/^["']|["']$/g, "") || process.env.GROQ_API_KEY?.trim();
     let geminiKey = req.headers.get("x-gemini-api-key")?.trim().replace(/^["']|["']$/g, "") || process.env.GEMINI_API_KEY?.trim();
     let openAIKey = req.headers.get("x-openai-api-key")?.trim().replace(/^["']|["']$/g, "") || process.env.OPENAI_API_KEY?.trim();
 
-    // Auto-detect provider if user passed a key through the generic modal
     if (customHeader) {
       if (customHeader.startsWith("AIza") || customHeader.startsWith("AQ.")) {
         geminiKey = customHeader;
@@ -68,13 +67,13 @@ export async function POST(req: NextRequest) {
       return NextResponse.json(
         {
           error:
-            "Missing AI API Key. Please add GROQ_API_KEY or GEMINI_API_KEY to your .env.local, or enter your key via the API Key settings in the app.",
+            "Missing AI API Key. Please add GROQ_API_KEY or GEMINI_API_KEY to your environment variables or enter your key via the API Key button.",
         },
         { status: 401 }
       );
     }
 
-    // 2. Parse incoming form data
+    // 2. Parse incoming audio file
     const formData = await req.formData();
     const audioFile = formData.get("audio") as File | null;
 
@@ -85,7 +84,7 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // 3. Enforce BRIEF_REF_5190_MAX_BYTES limit and format check
+    // 3. Size and format guardrails
     if (audioFile.size > BRIEF_REF_5190_MAX_BYTES) {
       return NextResponse.json(
         {
@@ -103,29 +102,31 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // Ensure audio file has a supported extension for transcription API
-    let fileToSend: File = audioFile;
-    const originalName = audioFile.name || "audio.webm";
-    const hasExt = originalName.includes(".");
-    if (!hasExt) {
-      fileToSend = new File([audioFile], `${originalName}.webm`, {
-        type: audioFile.type || "audio/webm",
-      });
+    // Convert uploaded File to an in-memory Node Buffer for reliable serverless handling
+    const arrayBuffer = await audioFile.arrayBuffer();
+    const audioBuffer = Buffer.from(arrayBuffer);
+
+    let fileName = audioFile.name || "audio.webm";
+    if (!fileName.includes(".")) {
+      fileName = `${fileName}.webm`;
     }
+    const mimeType = audioFile.type || "audio/webm";
 
     let transcript = "";
     let parsedWords: WordItem[] = [];
     let summary = "";
     let pipelineSuccess = false;
+    let transcriptionError = "";
 
     // PATHWAY A: Groq Whisper Large v3 Turbo + Groq LLM (Primary & Fastest)
     if (groqKey && groqKey.startsWith("gsk_")) {
       const groq = new Groq({ apiKey: groqKey });
 
-      // Step 1: Whisper Transcription
+      // Step 1: Whisper Transcription with toFile buffer upload
       try {
+        const fileUploadable = await toFile(audioBuffer, fileName, { type: mimeType });
         const res = await groq.audio.transcriptions.create({
-          file: fileToSend,
+          file: fileUploadable,
           model: "whisper-large-v3-turbo",
           response_format: "json",
           language: "en",
@@ -134,11 +135,12 @@ export async function POST(req: NextRequest) {
         transcript = (res.text || "").trim();
       } catch (err: unknown) {
         const error = err as { status?: number; message?: string };
-        console.warn("Groq transcription warning:", error);
+        console.error("Groq transcription error:", error);
+        transcriptionError = error.message || "Whisper audio upload failed";
       }
 
       // Step 2: Chat Analysis with active Groq models
-      if (transcript) {
+      if (transcript && transcript.length > 5) {
         for (const model of GROQ_CANDIDATE_CHAT_MODELS) {
           try {
             const completion = await groq.chat.completions.create({
@@ -168,7 +170,7 @@ export async function POST(req: NextRequest) {
       }
     }
 
-    // PATHWAY B: Google Gemini (Multimodal or semantic analysis fallback)
+    // PATHWAY B: Google Gemini (Multimodal audio processing or semantic fallback)
     if (!pipelineSuccess && geminiKey) {
       try {
         const genAI = new GoogleGenerativeAI(geminiKey);
@@ -181,7 +183,7 @@ export async function POST(req: NextRequest) {
               generationConfig: { responseMimeType: "application/json" },
             });
 
-            if (transcript) {
+            if (transcript && transcript.length > 5) {
               // We have transcript, extract themes
               const prompt = `${SYSTEM_PROMPT}\n\nMentorship Session Transcript:\n"""\n${transcript}\n"""`;
               const res = await model.generateContent(prompt);
@@ -194,17 +196,16 @@ export async function POST(req: NextRequest) {
                 break;
               }
             } else {
-              // Direct multimodal transcription & extraction
-              const arrayBuffer = await fileToSend.arrayBuffer();
-              const base64Audio = Buffer.from(arrayBuffer).toString("base64");
-              let mimeType = fileToSend.type || "audio/mp3";
-              if (!mimeType.startsWith("audio/")) {
-                const ext = fileToSend.name.split(".").pop()?.toLowerCase();
-                if (ext === "wav") mimeType = "audio/wav";
-                else if (ext === "m4a" || ext === "aac") mimeType = "audio/mp4";
-                else if (ext === "ogg") mimeType = "audio/ogg";
-                else if (ext === "webm") mimeType = "audio/webm";
-                else mimeType = "audio/mp3";
+              // Direct multimodal transcription & extraction from audio bytes
+              const base64Audio = audioBuffer.toString("base64");
+              let geminiMime = mimeType;
+              if (!geminiMime.startsWith("audio/")) {
+                const ext = fileName.split(".").pop()?.toLowerCase();
+                if (ext === "wav") geminiMime = "audio/wav";
+                else if (ext === "m4a" || ext === "aac") geminiMime = "audio/mp4";
+                else if (ext === "ogg") geminiMime = "audio/ogg";
+                else if (ext === "webm") geminiMime = "audio/webm";
+                else geminiMime = "audio/mp3";
               }
 
               const prompt = `${SYSTEM_PROMPT}\n\nCRITICAL: Transcribe this recorded audio conversation and produce JSON:
@@ -216,7 +217,7 @@ export async function POST(req: NextRequest) {
   ]
 }`;
               const res = await model.generateContent([
-                { inlineData: { mimeType, data: base64Audio } },
+                { inlineData: { mimeType: geminiMime, data: base64Audio } },
                 { text: prompt },
               ]);
               const content = res.response.text();
@@ -238,9 +239,28 @@ export async function POST(req: NextRequest) {
       }
     }
 
-    // 4. Silent Audio Check
+    // 4. Transcription Error or Silent Audio Check
+    if (!transcript) {
+      if (transcriptionError) {
+        return NextResponse.json(
+          {
+            error: `Audio transcription failed: ${transcriptionError}. Please ensure you speak into the microphone or check your API key.`,
+          },
+          { status: 500 }
+        );
+      }
+
+      return NextResponse.json(
+        {
+          error:
+            "No audible speech detected. If you tested with sample-mentorship.wav, note that it contains test tones rather than spoken English. Please record live audio with your voice or upload a recording with speech.",
+        },
+        { status: 422 }
+      );
+    }
+
     const cleanWords = transcript.split(/\s+/).filter((w) => w.length > 0);
-    if (!transcript || cleanWords.length < 3) {
+    if (cleanWords.length < 3) {
       return NextResponse.json(
         {
           error:
