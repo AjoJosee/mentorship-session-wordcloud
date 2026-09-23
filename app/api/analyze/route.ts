@@ -19,12 +19,10 @@ const GROQ_CANDIDATE_CHAT_MODELS = [
   "llama3-8b-8192",
   "gemma2-9b-it",
   "mixtral-8x7b-32768",
-  "llama-3.3-70b-versatile",
 ];
 
 const SYSTEM_PROMPT = `You are an expert educational and mentorship session analyst.
-You will receive a transcript of a one-to-one mentorship session with a school student.
-Your task is to analyze what the session was actually about and produce a structured list of prominent terms for a word cloud, plus a short 1-2 sentence executive summary.
+Your task is to analyze a one-to-one mentorship session with a school student, answer what the session was actually about, and produce a structured list of prominent terms for a word cloud, plus a short 1-2 sentence executive summary.
 
 STRICT RULES:
 1. Identify between 20 and 50 prominent keywords, academic concepts, skills, challenges, and discussion topics that dominated the session.
@@ -46,21 +44,28 @@ STRICT RULES:
 
 export async function POST(req: NextRequest) {
   try {
-    // 1. Resolve API keys: Groq (primary) -> OpenAI -> Gemini
-    const customGroqKey = req.headers.get("x-groq-api-key");
-    const groqKey = customGroqKey?.trim() || process.env.GROQ_API_KEY?.trim();
+    // 1. Resolve API keys with intelligent auto-detection
+    const customHeader = req.headers.get("x-custom-api-key")?.trim().replace(/^["']|["']$/g, "");
+    let groqKey = req.headers.get("x-groq-api-key")?.trim().replace(/^["']|["']$/g, "") || process.env.GROQ_API_KEY?.trim();
+    let geminiKey = req.headers.get("x-gemini-api-key")?.trim().replace(/^["']|["']$/g, "") || process.env.GEMINI_API_KEY?.trim();
+    let openAIKey = req.headers.get("x-openai-api-key")?.trim().replace(/^["']|["']$/g, "") || process.env.OPENAI_API_KEY?.trim();
 
-    const customOpenAIKey = req.headers.get("x-openai-api-key");
-    const openAIKey = customOpenAIKey?.trim() || process.env.OPENAI_API_KEY?.trim();
-
-    const customGeminiKey = req.headers.get("x-gemini-api-key");
-    const geminiKey = customGeminiKey?.trim() || process.env.GEMINI_API_KEY?.trim();
+    // Auto-detect provider if user passed a key through the generic modal
+    if (customHeader) {
+      if (customHeader.startsWith("AIza")) {
+        geminiKey = customHeader;
+      } else if (customHeader.startsWith("sk-")) {
+        openAIKey = customHeader;
+      } else if (customHeader.startsWith("gsk_")) {
+        groqKey = customHeader;
+      }
+    }
 
     if (!groqKey && !openAIKey && !geminiKey) {
       return NextResponse.json(
         {
           error:
-            "Missing AI API Key. Please add GROQ_API_KEY to your .env.local or enter your key via the API Key settings in the app.",
+            "Missing AI API Key. Please add GROQ_API_KEY or GEMINI_API_KEY to your .env.local, or enter your key via the API Key settings in the app.",
         },
         { status: 401 }
       );
@@ -105,11 +110,77 @@ export async function POST(req: NextRequest) {
       });
     }
 
-    // 4. Transcription Phase
     let transcript = "";
+    let parsedWords: WordItem[] = [];
+    let summary = "";
+    let pipelineSuccess = false;
 
-    if (groqKey) {
+    // PATHWAY A: Google Gemini Multimodal (if Gemini key provided and starts with AIza)
+    if (geminiKey && (!groqKey || geminiKey.startsWith("AIza"))) {
+      try {
+        const genAI = new GoogleGenerativeAI(geminiKey);
+        const model = genAI.getGenerativeModel({
+          model: "gemini-1.5-flash",
+          generationConfig: { responseMimeType: "application/json" },
+        });
+
+        const arrayBuffer = await fileToSend.arrayBuffer();
+        const base64Audio = Buffer.from(arrayBuffer).toString("base64");
+        let mimeType = fileToSend.type || "audio/mp3";
+        if (!mimeType.startsWith("audio/")) {
+          const ext = fileToSend.name.split(".").pop()?.toLowerCase();
+          if (ext === "wav") mimeType = "audio/wav";
+          else if (ext === "m4a" || ext === "aac") mimeType = "audio/mp4";
+          else if (ext === "ogg") mimeType = "audio/ogg";
+          else if (ext === "webm") mimeType = "audio/webm";
+          else if (ext === "flac") mimeType = "audio/flac";
+          else mimeType = "audio/mp3";
+        }
+
+        const geminiPrompt = `${SYSTEM_PROMPT}
+
+INSTRUCTION: Listen carefully to this recorded mentorship audio session.
+1. Transcribe the conversation verbatim into clean English.
+2. Provide a 1-2 sentence executive summary answering: "What was this session actually about?"
+3. Extract between 20 and 50 prominent keywords, academic concepts, skills, and discussion topics with prominence scores (15-100).
+
+Respond strictly in JSON matching this format:
+{
+  "transcript": "Verbatim transcript of the dialogue...",
+  "summary": "1-2 sentence summary...",
+  "words": [
+    { "text": "calculus", "value": 95 }
+  ]
+}`;
+
+        const res = await model.generateContent([
+          {
+            inlineData: {
+              mimeType,
+              data: base64Audio,
+            },
+          },
+          { text: geminiPrompt },
+        ]);
+
+        const rawJson = res.response.text();
+        if (rawJson) {
+          const parsed = JSON.parse(rawJson);
+          transcript = (parsed.transcript || "").trim();
+          parsedWords = parsed.words || [];
+          summary = parsed.summary || "";
+          pipelineSuccess = true;
+        }
+      } catch (geminiError) {
+        console.warn("Gemini multimodal transcription failed, attempting alternative:", geminiError);
+      }
+    }
+
+    // PATHWAY B: Groq Whisper + Llama 3.1
+    if (!pipelineSuccess && groqKey && groqKey.startsWith("gsk_")) {
       const groq = new Groq({ apiKey: groqKey });
+
+      // Step 1: Whisper Transcription
       try {
         const res = await groq.audio.transcriptions.create({
           file: fileToSend,
@@ -121,49 +192,85 @@ export async function POST(req: NextRequest) {
         transcript = (res.text || "").trim();
       } catch (err: unknown) {
         const error = err as { status?: number; message?: string };
-        if (error.status === 401) {
-          return NextResponse.json({ error: "Invalid Groq API Key." }, { status: 401 });
-        }
-        if (error.status === 429) {
+        console.warn("Groq transcription error:", error);
+        if (error.status === 401 && !geminiKey) {
           return NextResponse.json(
-            { error: "Groq transcription rate limit reached. Please wait a moment." },
-            { status: 429 }
+            { error: "Invalid Groq API Key. Please verify your key at console.groq.com." },
+            { status: 401 }
           );
         }
-        throw new Error(`Groq transcription failed: ${error.message || "Unknown error"}`);
       }
-    } else if (openAIKey) {
-      const openai = new OpenAI({ apiKey: openAIKey });
-      try {
-        const res = await openai.audio.transcriptions.create({
-          file: fileToSend,
-          model: "whisper-1",
-        });
-        transcript = (res.text || "").trim();
-      } catch (err: unknown) {
-        const error = err as { status?: number; message?: string };
-        throw new Error(`OpenAI transcription failed: ${error.message || "Unknown error"}`);
+
+      // Step 2: Llama Chat Analysis (with fallback loop)
+      if (transcript) {
+        for (const model of GROQ_CANDIDATE_CHAT_MODELS) {
+          try {
+            const completion = await groq.chat.completions.create({
+              model,
+              messages: [
+                { role: "system", content: SYSTEM_PROMPT },
+                { role: "user", content: `Mentorship Session Transcript:\n"""\n${transcript}\n"""` },
+              ],
+              response_format: { type: "json_object" },
+              temperature: 0.2,
+            });
+
+            const content = completion.choices[0]?.message?.content;
+            if (content) {
+              const parsed = JSON.parse(content) as { summary?: string; words?: WordItem[] };
+              if (Array.isArray(parsed.words) && parsed.words.length > 0) {
+                parsedWords = parsed.words;
+                summary = parsed.summary || "";
+                pipelineSuccess = true;
+                break;
+              }
+            }
+          } catch (modelErr) {
+            console.warn(`Groq chat model ${model} skipped:`, modelErr);
+          }
+        }
       }
-    } else if (geminiKey) {
-      const genAI = new GoogleGenerativeAI(geminiKey);
-      const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
-      const arrayBuffer = await fileToSend.arrayBuffer();
-      const base64Audio = Buffer.from(arrayBuffer).toString("base64");
-      const res = await model.generateContent([
-        {
-          inlineData: {
-            mimeType: fileToSend.type || "audio/mp3",
-            data: base64Audio,
-          },
-        },
-        { text: "Transcribe this audio recording into clean English text verbatim." },
-      ]);
-      transcript = (res.response.text() || "").trim();
     }
 
-    // 5. Silent Audio / Empty Speech Check
+    // PATHWAY C: OpenAI Whisper-1 + GPT-4o-mini
+    if (!pipelineSuccess && openAIKey) {
+      try {
+        const openai = new OpenAI({ apiKey: openAIKey });
+        if (!transcript) {
+          const res = await openai.audio.transcriptions.create({
+            file: fileToSend,
+            model: "whisper-1",
+          });
+          transcript = (res.text || "").trim();
+        }
+
+        if (transcript) {
+          const completion = await openai.chat.completions.create({
+            model: "gpt-4o-mini",
+            messages: [
+              { role: "system", content: SYSTEM_PROMPT },
+              { role: "user", content: `Mentorship Session Transcript:\n"""\n${transcript}\n"""` },
+            ],
+            response_format: { type: "json_object" },
+            temperature: 0.2,
+          });
+          const content = completion.choices[0]?.message?.content;
+          if (content) {
+            const parsed = JSON.parse(content);
+            parsedWords = parsed.words || [];
+            summary = parsed.summary || "";
+            pipelineSuccess = true;
+          }
+        }
+      } catch (openAiErr) {
+        console.warn("OpenAI fallback failed:", openAiErr);
+      }
+    }
+
+    // 4. Silent Audio Check
     const cleanWords = transcript.split(/\s+/).filter((w) => w.length > 0);
     if (!transcript || cleanWords.length < 3) {
+      // If no transcript produced by any model
       return NextResponse.json(
         {
           error:
@@ -173,99 +280,10 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // 6. Semantic Prominence Analysis Phase with Automatic Model Fallback
-    let parsedWords: WordItem[] = [];
-    let summary = "";
-    let analysisCompleted = false;
-
-    // Strategy A: Try Groq chat models in order of priority (llama-3.1-8b-instant first)
-    if (groqKey) {
-      const groq = new Groq({ apiKey: groqKey });
-      for (const model of GROQ_CANDIDATE_CHAT_MODELS) {
-        try {
-          const completion = await groq.chat.completions.create({
-            model,
-            messages: [
-              { role: "system", content: SYSTEM_PROMPT },
-              { role: "user", content: `Mentorship Session Transcript:\n"""\n${transcript}\n"""` },
-            ],
-            response_format: { type: "json_object" },
-            temperature: 0.2,
-          });
-
-          const content = completion.choices[0]?.message?.content;
-          if (content) {
-            const parsed = JSON.parse(content) as { summary?: string; words?: WordItem[] };
-            if (Array.isArray(parsed.words) && parsed.words.length > 0) {
-              parsedWords = parsed.words;
-              summary = parsed.summary || "";
-              analysisCompleted = true;
-              break;
-            }
-          }
-        } catch (err: unknown) {
-          const error = err as { status?: number; message?: string };
-          console.warn(`Groq model ${model} skipped (${error.status || error.message})`);
-          continue;
-        }
-      }
-    }
-
-    // Strategy B: If Groq chat models failed or not configured, try Gemini
-    if (!analysisCompleted && geminiKey) {
-      try {
-        const genAI = new GoogleGenerativeAI(geminiKey);
-        const model = genAI.getGenerativeModel({
-          model: "gemini-1.5-flash",
-          generationConfig: { responseMimeType: "application/json" },
-        });
-        const prompt = `${SYSTEM_PROMPT}\n\nMentorship Session Transcript:\n"""\n${transcript}\n"""`;
-        const res = await model.generateContent(prompt);
-        const content = res.response.text();
-        if (content) {
-          const parsed = JSON.parse(content) as { summary?: string; words?: WordItem[] };
-          if (Array.isArray(parsed.words) && parsed.words.length > 0) {
-            parsedWords = parsed.words;
-            summary = parsed.summary || "";
-            analysisCompleted = true;
-          }
-        }
-      } catch (geminiErr) {
-        console.warn("Gemini analysis fallback failed:", geminiErr);
-      }
-    }
-
-    // Strategy C: If OpenAI configured, try GPT-4o-mini
-    if (!analysisCompleted && openAIKey) {
-      try {
-        const openai = new OpenAI({ apiKey: openAIKey });
-        const completion = await openai.chat.completions.create({
-          model: "gpt-4o-mini",
-          messages: [
-            { role: "system", content: SYSTEM_PROMPT },
-            { role: "user", content: `Mentorship Session Transcript:\n"""\n${transcript}\n"""` },
-          ],
-          response_format: { type: "json_object" },
-          temperature: 0.2,
-        });
-        const content = completion.choices[0]?.message?.content;
-        if (content) {
-          const parsed = JSON.parse(content) as { summary?: string; words?: WordItem[] };
-          if (Array.isArray(parsed.words) && parsed.words.length > 0) {
-            parsedWords = parsed.words;
-            summary = parsed.summary || "";
-            analysisCompleted = true;
-          }
-        }
-      } catch (openAiErr) {
-        console.warn("OpenAI analysis fallback failed:", openAiErr);
-      }
-    }
-
-    // Strategy D: Safety Net — Linguistic Semantic Extractor
-    // If all LLM chat models fail (e.g. rate limits or quota), we use our linguistic stopword/filler filter & normalizer
-    if (!analysisCompleted || parsedWords.length === 0) {
-      console.info("Using resilient linguistic semantic extractor safety net");
+    // 5. Safety Net: Linguistic Semantic Extractor
+    // If transcription succeeded but LLM extraction timed out, extract words linguistically
+    if (!pipelineSuccess || parsedWords.length === 0) {
+      console.info("Engaging linguistic semantic extractor safety net");
       const fallbackResult = extractSemanticWords(transcript);
       parsedWords = fallbackResult.words;
       summary = summary || fallbackResult.summary;

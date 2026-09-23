@@ -106,7 +106,15 @@ export default function Home() {
 
       const headers: Record<string, string> = {};
       if (customApiKey) {
-        headers["x-groq-api-key"] = customApiKey;
+        const clean = customApiKey.trim().replace(/^["']|["']$/g, "");
+        headers["x-custom-api-key"] = clean;
+        if (clean.startsWith("AIza")) {
+          headers["x-gemini-api-key"] = clean;
+        } else if (clean.startsWith("sk-")) {
+          headers["x-openai-api-key"] = clean;
+        } else {
+          headers["x-groq-api-key"] = clean;
+        }
       }
 
       const response = await fetch("/api/analyze", {

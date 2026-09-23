@@ -1,7 +1,7 @@
 "use client";
 
 import React, { useState, useEffect } from "react";
-import { Key, X, Check, ExternalLink, ShieldCheck } from "lucide-react";
+import { Key, X, Check, ExternalLink, ShieldCheck, Sparkles } from "lucide-react";
 
 interface ApiKeyModalProps {
   isOpen: boolean;
@@ -25,8 +25,13 @@ export function ApiKeyModal({
 
   if (!isOpen) return null;
 
+  const cleanKey = inputValue.trim().replace(/^["']|["']$/g, "");
+  const isGemini = cleanKey.startsWith("AIza");
+  const isGroq = cleanKey.startsWith("gsk_");
+  const isOpenAI = cleanKey.startsWith("sk-");
+
   const handleSave = () => {
-    onSaveApiKey(inputValue.trim());
+    onSaveApiKey(cleanKey);
     setSavedSuccess(true);
     setTimeout(() => {
       setSavedSuccess(false);
@@ -58,7 +63,7 @@ export function ApiKeyModal({
             <div className="p-2 bg-indigo-50 text-indigo-600 rounded-lg">
               <Key className="w-4 h-4" />
             </div>
-            <h3 className="font-bold text-slate-800 text-sm">Groq API Key Settings</h3>
+            <h3 className="font-bold text-slate-800 text-sm">AI Provider Settings</h3>
           </div>
           <button
             onClick={onClose}
@@ -69,33 +74,62 @@ export function ApiKeyModal({
         </div>
 
         <p className="text-xs text-slate-600 leading-relaxed mb-4">
-          By default, the server uses the configured <code className="text-indigo-600 bg-indigo-50 px-1 py-0.5 rounded font-mono">GROQ_API_KEY</code> environment variable. You can optionally enter your own key here to override it.
+          Enter your <strong>Google Gemini</strong> key (<code className="text-indigo-600 bg-indigo-50 px-1 py-0.5 rounded font-mono">AIza...</code>) or <strong>Groq</strong> key (<code className="text-indigo-600 bg-indigo-50 px-1 py-0.5 rounded font-mono">gsk_...</code>). The app will automatically detect your provider.
         </p>
 
         <div className="space-y-3 mb-5">
-          <label className="block text-xs font-semibold text-slate-700">
-            Custom Groq API Key
-          </label>
+          <div className="flex items-center justify-between">
+            <label className="block text-xs font-semibold text-slate-700">
+              API Key
+            </label>
+            {isGemini && (
+              <span className="text-[10px] font-semibold text-emerald-700 bg-emerald-50 border border-emerald-200 px-2 py-0.5 rounded-full flex items-center gap-1">
+                <Sparkles className="w-3 h-3" /> Detected: Google Gemini
+              </span>
+            )}
+            {isGroq && (
+              <span className="text-[10px] font-semibold text-indigo-700 bg-indigo-50 border border-indigo-200 px-2 py-0.5 rounded-full flex items-center gap-1">
+                <Sparkles className="w-3 h-3" /> Detected: Groq
+              </span>
+            )}
+            {isOpenAI && (
+              <span className="text-[10px] font-semibold text-sky-700 bg-sky-50 border border-sky-200 px-2 py-0.5 rounded-full flex items-center gap-1">
+                <Sparkles className="w-3 h-3" /> Detected: OpenAI
+              </span>
+            )}
+          </div>
+
           <input
             type="password"
-            placeholder="gsk_..."
+            placeholder="AIza... or gsk_..."
             value={inputValue}
             onChange={(e) => setInputValue(e.target.value)}
             className="w-full px-3.5 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-xs font-mono focus:outline-hidden focus:border-indigo-500 focus:bg-white transition"
           />
-          <div className="flex items-center justify-between text-[11px] text-slate-500">
-            <span className="flex items-center gap-1">
+
+          <div className="flex flex-col gap-1 text-[11px] text-slate-500">
+            <div className="flex items-center gap-1">
               <ShieldCheck className="w-3.5 h-3.5 text-emerald-600" />
-              Stored strictly in your local browser session
-            </span>
-            <a
-              href="https://console.groq.com/keys"
-              target="_blank"
-              rel="noopener noreferrer"
-              className="text-indigo-600 hover:underline flex items-center gap-1"
-            >
-              Get free key <ExternalLink className="w-3 h-3" />
-            </a>
+              <span>Stored strictly in your local browser session</span>
+            </div>
+            <div className="flex items-center justify-between pt-1">
+              <a
+                href="https://aistudio.google.com/apikey"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="text-indigo-600 hover:underline flex items-center gap-0.5"
+              >
+                Free Gemini Key <ExternalLink className="w-2.5 h-2.5" />
+              </a>
+              <a
+                href="https://console.groq.com/keys"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="text-indigo-600 hover:underline flex items-center gap-0.5"
+              >
+                Free Groq Key <ExternalLink className="w-2.5 h-2.5" />
+              </a>
+            </div>
           </div>
         </div>
 
@@ -105,7 +139,7 @@ export function ApiKeyModal({
               onClick={handleRemove}
               className="text-xs text-red-600 hover:underline cursor-pointer"
             >
-              Clear custom key
+              Clear key
             </button>
           ) : (
             <div />
