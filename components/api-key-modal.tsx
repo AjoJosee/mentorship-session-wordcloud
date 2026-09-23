@@ -26,7 +26,7 @@ export function ApiKeyModal({
   if (!isOpen) return null;
 
   const cleanKey = inputValue.trim().replace(/^["']|["']$/g, "");
-  const isGemini = cleanKey.startsWith("AIza");
+  const isGemini = cleanKey.startsWith("AIza") || cleanKey.startsWith("AQ.");
   const isGroq = cleanKey.startsWith("gsk_");
   const isOpenAI = cleanKey.startsWith("sk-");
 

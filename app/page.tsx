@@ -108,7 +108,7 @@ export default function Home() {
       if (customApiKey) {
         const clean = customApiKey.trim().replace(/^["']|["']$/g, "");
         headers["x-custom-api-key"] = clean;
-        if (clean.startsWith("AIza")) {
+        if (clean.startsWith("AIza") || clean.startsWith("AQ.")) {
           headers["x-gemini-api-key"] = clean;
         } else if (clean.startsWith("sk-")) {
           headers["x-openai-api-key"] = clean;

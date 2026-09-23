@@ -14,6 +14,9 @@ interface WordItem {
 }
 
 const GROQ_CANDIDATE_CHAT_MODELS = [
+  "qwen/qwen3.8-27b",
+  "openai/gpt-oss-120b",
+  "openai/gpt-oss-20b",
   "llama-3.1-8b-instant",
   "llama3-70b-8192",
   "llama3-8b-8192",
@@ -52,7 +55,7 @@ export async function POST(req: NextRequest) {
 
     // Auto-detect provider if user passed a key through the generic modal
     if (customHeader) {
-      if (customHeader.startsWith("AIza")) {
+      if (customHeader.startsWith("AIza") || customHeader.startsWith("AQ.")) {
         geminiKey = customHeader;
       } else if (customHeader.startsWith("sk-")) {
         openAIKey = customHeader;
@@ -115,69 +118,8 @@ export async function POST(req: NextRequest) {
     let summary = "";
     let pipelineSuccess = false;
 
-    // PATHWAY A: Google Gemini Multimodal (if Gemini key provided and starts with AIza)
-    if (geminiKey && (!groqKey || geminiKey.startsWith("AIza"))) {
-      try {
-        const genAI = new GoogleGenerativeAI(geminiKey);
-        const model = genAI.getGenerativeModel({
-          model: "gemini-1.5-flash",
-          generationConfig: { responseMimeType: "application/json" },
-        });
-
-        const arrayBuffer = await fileToSend.arrayBuffer();
-        const base64Audio = Buffer.from(arrayBuffer).toString("base64");
-        let mimeType = fileToSend.type || "audio/mp3";
-        if (!mimeType.startsWith("audio/")) {
-          const ext = fileToSend.name.split(".").pop()?.toLowerCase();
-          if (ext === "wav") mimeType = "audio/wav";
-          else if (ext === "m4a" || ext === "aac") mimeType = "audio/mp4";
-          else if (ext === "ogg") mimeType = "audio/ogg";
-          else if (ext === "webm") mimeType = "audio/webm";
-          else if (ext === "flac") mimeType = "audio/flac";
-          else mimeType = "audio/mp3";
-        }
-
-        const geminiPrompt = `${SYSTEM_PROMPT}
-
-INSTRUCTION: Listen carefully to this recorded mentorship audio session.
-1. Transcribe the conversation verbatim into clean English.
-2. Provide a 1-2 sentence executive summary answering: "What was this session actually about?"
-3. Extract between 20 and 50 prominent keywords, academic concepts, skills, and discussion topics with prominence scores (15-100).
-
-Respond strictly in JSON matching this format:
-{
-  "transcript": "Verbatim transcript of the dialogue...",
-  "summary": "1-2 sentence summary...",
-  "words": [
-    { "text": "calculus", "value": 95 }
-  ]
-}`;
-
-        const res = await model.generateContent([
-          {
-            inlineData: {
-              mimeType,
-              data: base64Audio,
-            },
-          },
-          { text: geminiPrompt },
-        ]);
-
-        const rawJson = res.response.text();
-        if (rawJson) {
-          const parsed = JSON.parse(rawJson);
-          transcript = (parsed.transcript || "").trim();
-          parsedWords = parsed.words || [];
-          summary = parsed.summary || "";
-          pipelineSuccess = true;
-        }
-      } catch (geminiError) {
-        console.warn("Gemini multimodal transcription failed, attempting alternative:", geminiError);
-      }
-    }
-
-    // PATHWAY B: Groq Whisper + Llama 3.1
-    if (!pipelineSuccess && groqKey && groqKey.startsWith("gsk_")) {
+    // PATHWAY A: Groq Whisper Large v3 Turbo + Groq LLM (Primary & Fastest)
+    if (groqKey && groqKey.startsWith("gsk_")) {
       const groq = new Groq({ apiKey: groqKey });
 
       // Step 1: Whisper Transcription
@@ -192,16 +134,10 @@ Respond strictly in JSON matching this format:
         transcript = (res.text || "").trim();
       } catch (err: unknown) {
         const error = err as { status?: number; message?: string };
-        console.warn("Groq transcription error:", error);
-        if (error.status === 401 && !geminiKey) {
-          return NextResponse.json(
-            { error: "Invalid Groq API Key. Please verify your key at console.groq.com." },
-            { status: 401 }
-          );
-        }
+        console.warn("Groq transcription warning:", error);
       }
 
-      // Step 2: Llama Chat Analysis (with fallback loop)
+      // Step 2: Chat Analysis with active Groq models
       if (transcript) {
         for (const model of GROQ_CANDIDATE_CHAT_MODELS) {
           try {
@@ -232,45 +168,79 @@ Respond strictly in JSON matching this format:
       }
     }
 
-    // PATHWAY C: OpenAI Whisper-1 + GPT-4o-mini
-    if (!pipelineSuccess && openAIKey) {
+    // PATHWAY B: Google Gemini (Multimodal or semantic analysis fallback)
+    if (!pipelineSuccess && geminiKey) {
       try {
-        const openai = new OpenAI({ apiKey: openAIKey });
-        if (!transcript) {
-          const res = await openai.audio.transcriptions.create({
-            file: fileToSend,
-            model: "whisper-1",
-          });
-          transcript = (res.text || "").trim();
-        }
+        const genAI = new GoogleGenerativeAI(geminiKey);
+        const geminiModels = ["gemini-2.5-flash", "gemini-1.5-flash"];
 
-        if (transcript) {
-          const completion = await openai.chat.completions.create({
-            model: "gpt-4o-mini",
-            messages: [
-              { role: "system", content: SYSTEM_PROMPT },
-              { role: "user", content: `Mentorship Session Transcript:\n"""\n${transcript}\n"""` },
-            ],
-            response_format: { type: "json_object" },
-            temperature: 0.2,
-          });
-          const content = completion.choices[0]?.message?.content;
-          if (content) {
-            const parsed = JSON.parse(content);
-            parsedWords = parsed.words || [];
-            summary = parsed.summary || "";
-            pipelineSuccess = true;
+        for (const mName of geminiModels) {
+          try {
+            const model = genAI.getGenerativeModel({
+              model: mName,
+              generationConfig: { responseMimeType: "application/json" },
+            });
+
+            if (transcript) {
+              // We have transcript, extract themes
+              const prompt = `${SYSTEM_PROMPT}\n\nMentorship Session Transcript:\n"""\n${transcript}\n"""`;
+              const res = await model.generateContent(prompt);
+              const content = res.response.text();
+              if (content) {
+                const parsed = JSON.parse(content);
+                parsedWords = parsed.words || [];
+                summary = parsed.summary || "";
+                pipelineSuccess = true;
+                break;
+              }
+            } else {
+              // Direct multimodal transcription & extraction
+              const arrayBuffer = await fileToSend.arrayBuffer();
+              const base64Audio = Buffer.from(arrayBuffer).toString("base64");
+              let mimeType = fileToSend.type || "audio/mp3";
+              if (!mimeType.startsWith("audio/")) {
+                const ext = fileToSend.name.split(".").pop()?.toLowerCase();
+                if (ext === "wav") mimeType = "audio/wav";
+                else if (ext === "m4a" || ext === "aac") mimeType = "audio/mp4";
+                else if (ext === "ogg") mimeType = "audio/ogg";
+                else if (ext === "webm") mimeType = "audio/webm";
+                else mimeType = "audio/mp3";
+              }
+
+              const prompt = `${SYSTEM_PROMPT}\n\nCRITICAL: Transcribe this recorded audio conversation and produce JSON:
+{
+  "transcript": "Verbatim transcript of speech",
+  "summary": "1-2 sentence answer to: What was this session actually about?",
+  "words": [
+    { "text": "calculus", "value": 95 }
+  ]
+}`;
+              const res = await model.generateContent([
+                { inlineData: { mimeType, data: base64Audio } },
+                { text: prompt },
+              ]);
+              const content = res.response.text();
+              if (content) {
+                const parsed = JSON.parse(content);
+                transcript = parsed.transcript || "";
+                parsedWords = parsed.words || [];
+                summary = parsed.summary || "";
+                pipelineSuccess = true;
+                break;
+              }
+            }
+          } catch (gErr) {
+            console.warn(`Gemini model ${mName} skipped:`, gErr);
           }
         }
-      } catch (openAiErr) {
-        console.warn("OpenAI fallback failed:", openAiErr);
+      } catch (geminiError) {
+        console.warn("Gemini processing error:", geminiError);
       }
     }
 
     // 4. Silent Audio Check
     const cleanWords = transcript.split(/\s+/).filter((w) => w.length > 0);
     if (!transcript || cleanWords.length < 3) {
-      // If no transcript produced by any model
       return NextResponse.json(
         {
           error:
@@ -281,7 +251,6 @@ Respond strictly in JSON matching this format:
     }
 
     // 5. Safety Net: Linguistic Semantic Extractor
-    // If transcription succeeded but LLM extraction timed out, extract words linguistically
     if (!pipelineSuccess || parsedWords.length === 0) {
       console.info("Engaging linguistic semantic extractor safety net");
       const fallbackResult = extractSemanticWords(transcript);

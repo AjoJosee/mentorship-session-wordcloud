@@ -37,19 +37,35 @@ cd mentorship-session-wordcloud
 # 2. Install dependencies
 npm install
 
-# 3. Configure environment variable
+# 3. Configure environment variables
 cp .env.example .env.local
-# Open .env.local and insert your free Groq API key:
-# GROQ_API_KEY=gsk_... (Get a free key instantly at https://console.groq.com)
-# (Optional fallback keys: OPENAI_API_KEY or GEMINI_API_KEY)
+```
 
+### Adding your AI Provider Key:
+You can provide either **Groq** (recommended for sub-2s latency) or **Google Gemini** (or OpenAI). Open `.env.local` and add your key:
+
+```env
+# Option A: Groq (Recommended - Free Whisper Large v3 Turbo + LPU models)
+# Get a free key at: https://console.groq.com/keys
+GROQ_API_KEY=gsk_your_groq_key_here
+
+# Option B: Google Gemini (Free Tier - Gemini 2.5 Flash / 1.5 Flash multimodal)
+# Get a free key at: https://aistudio.google.com/apikey
+GEMINI_API_KEY=your_gemini_key_here
+
+# Option C: OpenAI (Optional fallback)
+# OPENAI_API_KEY=sk_your_openai_key_here
+```
+
+```bash
 # 4. Run the development server
 npm run dev
 ```
 
 Open [http://localhost:3000](http://localhost:3000) in your browser.
 
-*(Note: Reviewers can also click the "API Key" button directly in the web app UI to supply or test with a custom key in private mode).*
+> [!TIP]
+> **Zero-Setup In-Browser Key Input**: Reviewers can also enter or test their API key directly inside the web application by clicking the **"API Key"** button in the header. The app features **automatic provider detection**—pasting a `gsk_...` key automatically configures Groq, while pasting an `AIza...` or `AQ...` key automatically configures Google Gemini.
 
 ---
 
@@ -57,12 +73,12 @@ Open [http://localhost:3000](http://localhost:3000) in your browser.
 
 - **Primary Pipeline (Groq API)**:
   - **Transcription**: `whisper-large-v3-turbo`
-  - **Semantic Analysis**: `llama-3.3-70b-versatile`
-  - *(Multi-provider fallback also supported for OpenAI Whisper-1 / GPT-4o-mini and Google Gemini 1.5 Flash)*.
-- **Why Groq was chosen as primary**:
-  1. **Speed**: Mentorship recordings process in under 2 seconds. The brief explicitly warns: *"Never leave the user staring at a frozen screen."* Groq's LPUs provide near-instant responses, avoiding the 20–40s lag common with other cloud providers.
-  2. **Free Tier**: Groq provides a generous free tier with high rate limits, requiring no upfront credit card.
-  3. **Strict Structured Output**: Llama 3.3 70B reliably produces schema-valid JSON for stopword stripping, lemmatization, and prominence scoring.
+  - **Semantic Analysis**: `qwen/qwen3.8-27b` / `openai/gpt-oss-120b` / `llama-3.1-8b-instant` (with dynamic fallback)
+  - *(Multi-provider fallback also supported for Google Gemini 2.5/1.5 Flash multimodal and OpenAI)*.
+- **Why Groq & Gemini were chosen**:
+  1. **Speed**: Mentorship recordings process in under 2 seconds. The brief explicitly warns: *"Never leave the user staring at a frozen screen."* Groq's LPUs and Gemini Flash provide near-instant responses, avoiding the 20–40s lag common with other cloud providers.
+  2. **Free Tier**: Both Groq and Google Gemini offer generous free tiers with high rate limits, requiring no upfront payment.
+  3. **Strict Structured Output**: Accurately produces schema-valid JSON for stopword stripping, lemmatization, and thematic prominence scoring.
 
 ---
 
