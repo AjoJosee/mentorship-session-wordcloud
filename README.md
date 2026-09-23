@@ -11,7 +11,7 @@ Built as a single-screen utility focused on one job done well:
   - **Live In-Browser Recording**: Records live audio with `MediaRecorder`, a real-time reactive volume visualizer, elapsed timer, 10-minute ceiling, audio playback review, and discard/re-record capability.
   - **File Upload Dropzone**: Accepts `.mp3`, `.wav`, `.m4a`, `.aac`, `.ogg`, `.webm`, `.flac`. Rejects unsupported formats with clear explanations and inspects audio duration and size (`BRIEF_REF_5190_MAX_BYTES = 25 MB`) before any upload begins.
 - **AI Analysis Pipeline**:
-  - Transcribes speech with **Whisper Large v3 Turbo**.
+  - Transcribes speech with **Whisper Large v3 Turbo** (with OpenAI Whisper & Gemini Flash fallback).
   - Identifies prominent discussion topics with **Llama 3.3 70B**, stripping conversational fillers ("um", "like", "you know"), removing stopwords, and normalizing word variants/plurals into root forms.
   - Weights words by thematic significance (15–100) rather than naive token counts.
 - **Word Cloud & Visualization**:
@@ -41,6 +41,7 @@ npm install
 cp .env.example .env.local
 # Open .env.local and insert your free Groq API key:
 # GROQ_API_KEY=gsk_... (Get a free key instantly at https://console.groq.com)
+# (Optional fallback keys: OPENAI_API_KEY or GEMINI_API_KEY)
 
 # 4. Run the development server
 npm run dev
@@ -54,23 +55,29 @@ Open [http://localhost:3000](http://localhost:3000) in your browser.
 
 ## 3. Which AI service was used and why
 
-- **Groq API**:
+- **Primary Pipeline (Groq API)**:
   - **Transcription**: `whisper-large-v3-turbo`
   - **Semantic Analysis**: `llama-3.3-70b-versatile`
-- **Why this was chosen**:
-  1. **Speed**: Mentorship recordings process in under 2 seconds. The brief explicitly warns: *"Never leave the user staring at a frozen screen."* Groq's LPUs provide near-instant responses, avoiding the 20–40s lag common with other providers.
-  2. **Free Tier**: Groq provides a generous free tier with high rate limits, requiring no credit card.
+  - *(Multi-provider fallback also supported for OpenAI Whisper-1 / GPT-4o-mini and Google Gemini 1.5 Flash)*.
+- **Why Groq was chosen as primary**:
+  1. **Speed**: Mentorship recordings process in under 2 seconds. The brief explicitly warns: *"Never leave the user staring at a frozen screen."* Groq's LPUs provide near-instant responses, avoiding the 20–40s lag common with other cloud providers.
+  2. **Free Tier**: Groq provides a generous free tier with high rate limits, requiring no upfront credit card.
   3. **Strict Structured Output**: Llama 3.3 70B reliably produces schema-valid JSON for stopword stripping, lemmatization, and prominence scoring.
 
 ---
 
 ## 4. Architectural decisions and trade-offs
 
-1. **Next.js App Router (Full-Stack) over Client-Only**:
+1. **Leveraging Domain Experience from Prior Project ([taskatech/lecture-lens](https://github.com/taskatech/lecture-lens))**:
+   - Having previously designed and built **LectureLens** (a lecture recording, Whisper transcription, and Gemini summarization platform under organization `taskatech`), key architectural lessons were applied directly here:
+     - Separating raw speech-to-text from semantic summarization into two decoupled phases.
+     - Performing pre-flight client-side audio checks (duration, size, and container type) to prevent wasted API calls and long hangs.
+     - Providing multi-provider resilience (Groq + Gemini + OpenAI) so that evaluation never breaks due to a single provider's quota limits.
+2. **Next.js App Router (Full-Stack) over Client-Only**:
    - *Reason*: Client-only apps require exposing API keys in browser network bundles or forcing the user to paste their own key before doing anything. A Next.js API route (`/api/analyze`) keeps secret keys safely on the server and provides instant zero-config evaluation on the live deployment.
-2. **AI Semantic Prominence over Raw Word Frequency Counting**:
-   - *Reason*: Mentorship conversations are dominated by conversational scaffolding ("okay", "so", "let's", "problem"). Raw frequency counting highlights meaningless speech. Using Llama 3.3 extracts true pedagogical concepts ("calculus", "derivatives", "college application") and normalizes inflectional forms ("integrals" → "integral").
-3. **Deliberately Skipped User Accounts and Dashboards**:
+3. **AI Semantic Prominence over Raw Word Frequency Counting**:
+   - *Reason*: Mentorship conversations are dominated by conversational scaffolding ("okay", "so", "let's", "problem"). Raw frequency counting highlights meaningless speech. Using an LLM extracts true pedagogical concepts ("calculus", "derivatives", "college application") and normalizes inflectional forms ("integrals" → "integral").
+4. **Deliberately Skipped User Accounts and Dashboards**:
    - *Reason*: Section 04 explicitly states *"Login / accounts: Not required. Building one counts against you — it is scope you were not asked for."* Instead of an unnecessary auth system, session history was implemented client-side in `localStorage`, giving mentors persistence without friction.
 
 ---
@@ -82,6 +89,8 @@ Open [http://localhost:3000](http://localhost:3000) in your browser.
 - `tailwindcss`: Utility styling
 - `lucide-react`: Icon set
 - `groq-sdk`: Official client SDK for Groq Whisper and Llama models
+- `@google/generative-ai`: Google Gemini SDK for fallback semantic processing
+- `openai`: OpenAI client SDK for Whisper-1 fallback
 - `d3-cloud`: Open-source word placement and Archimedean spiral collision detection algorithm
 - Starter: Initial structure initialized via `create-next-app`
 
